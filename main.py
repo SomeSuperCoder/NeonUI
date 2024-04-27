@@ -1,14 +1,9 @@
-import json
-import random
-import threading
-import time
+import ecdsa.util
 from kivy.core.clipboard import Clipboard
-import requests
 from kivy.lang import Builder
 from kivymd.app import MDApp
 from kivymd.uix.tab import MDTabsBase
 from kivymd.uix.floatlayout import MDFloatLayout
-import os
 from kivy.core.window import Window
 from kivymd.uix.filemanager import MDFileManager
 from kivymd.toast import toast
@@ -19,11 +14,19 @@ from kivymd.uix.textfield import MDTextField
 from kivymd.uix.card import MDCard
 from kivy.core.clipboard import Clipboard
 
+import requests
+import json
+import random
+import os
+import ecdsa
+import base58
+import random
+import hashlib
+import time
+import threading
+
 Window.size = (480, 800)
 node = "https://allen_neon_rpc.serveo.net"
-
-address = "26UfgMo6TEVY3FiGBFjufAiq1ujD47r1A2znBNSyhxfY4"
-
 
 class Tab(MDFloatLayout, MDTabsBase):
     '''Class implementing content for a tab.'''
@@ -37,6 +40,8 @@ class Wallet(MDApp):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         Window.bind(on_keyboard=self.events)
+        self.address = ""
+        self.sk = None
         self.manager_open = False
         self.file_manager = MDFileManager(
             exit_manager=self.exit_manager,
@@ -67,11 +72,30 @@ class Wallet(MDApp):
                     text="Отправить",
                     theme_text_color="Custom",
                     text_color=self.theme_cls.primary_color,
-                    on_release=lambda x: self.send(self.dialog_send),
-                ),
+                    on_release=lambda x: self.send(),
+                )
             ],
         )
         self.dialog_send.open()
+
+    def show_pem_dialog(self):
+        self.dialog_pem = MDDialog(
+            title="Private Key PEM",
+            type="custom",
+            content_cls=MDTextField (
+                    text = self.sk.to_pem().decode(),
+                    multiline=True
+                ),
+            buttons=[
+                MDFlatButton(
+                    text="Ок",
+                    theme_text_color="Custom",
+                    text_color=self.theme_cls.primary_color,
+                    on_release=lambda x: self.dialog_close(self.dialog_pem),
+                )
+            ],
+        )
+        self.dialog_pem.open()
 
     def select_path(self, path):
         '''It will be called when you click on the file name
@@ -107,8 +131,7 @@ class Wallet(MDApp):
         return Builder.load_file("kivy.kv")
 
     def on_start(self):
-        self.screen("main_screen")
-        self.refresh_balance()
+        self.screen("login")
 
     def screen(self, id_):
         self.root.current = id_
@@ -117,11 +140,181 @@ class Wallet(MDApp):
         target.dismiss()
 
     def refresh_balance(self):
-        account = json.loads(requests.get(f"{node}/account/{address}").text)
-        atoms = account["atoms"]
-        balance = atoms / 1_000_000
-        self.root.ids.user_address.text = address
+        balance = 0
+        account = json.loads(requests.get(f"{node}/account/{self.address}").text)
+
+        if account:
+            atoms = account["atoms"]
+            balance = atoms / 1_000_000
+        
         self.root.ids.balance_user.text = f"{balance} Neon"
 
-wallet = Wallet()
-wallet.run()
+    def create_account(self):
+        global address
+
+        self.sk = ecdsa.SigningKey.generate(curve=ecdsa.curves.SECP256k1)
+        self.address = base58.b58encode(self.sk.verifying_key.to_string("compressed")).decode()
+        self.screen("main_screen")
+        self.refresh_balance()
+
+    def send_logic(self, amount: int, to: str) -> tuple[dict, str]:
+        message = {
+            "nonce": str(random.randint(0, 10**100)),
+            "instruction": {
+                "program_id": "System",
+                "accounts": [
+                    # sender
+                    {
+                        "pubkey": self.address,
+                        "is_signer": True,
+                        "is_writable": True
+                    },
+                    # receiver
+                    {
+                        "pubkey": to,
+                        "is_signer": False,
+                        "is_writable": True
+                    }
+                ],
+                "data": json.dumps (
+                    {
+                        "Send": {
+                            "amount": int(amount * 1_000_000)
+                        }
+                    }
+                ).replace(" ", "")
+            }
+        }
+        a = json.dumps(message).replace(" ", "")
+        print(f"Siging: {a}")
+
+        sig = list(self.sk.sign_deterministic(a.encode(), sigencode=ecdsa.util.sigencode_der_canonize, hashfunc=hashlib.sha256))
+
+        tx = {
+            "signatures": [
+                sig
+            ],
+            "message": message
+        }
+
+        print(f"Tx: {json.dumps(tx)}")
+
+        ser_sig = base58.b58encode(bytes(sig)).decode()
+
+        return (tx, ser_sig)
+    
+    def create_system_account_logic(self, pubkey: str) -> tuple[dict, str]:
+        message = {
+            "nonce": str(random.randint(0, 10**100)),
+            "instruction": {
+                "program_id": "System",
+                "accounts": [
+                    # Just a fee payer
+                    {
+                        "pubkey": self.address,
+                        "is_signer": True,
+                        "is_writable": True
+                    }
+                ],
+                "data": json.dumps (
+                    {
+                        "CreateSystemAccount": {
+                            "pubkey": pubkey
+                        }
+                    }
+                ).replace(" ", "")
+            }
+        }
+        a = json.dumps(message).replace(" ", "")
+
+        sig = list(self.sk.sign_deterministic(a.encode(), sigencode=ecdsa.util.sigencode_der_canonize, hashfunc=hashlib.sha256))
+
+        tx = {
+            "signatures": [
+                sig
+            ],
+            "message": message
+        }
+
+
+        ser_sig = base58.b58encode(bytes(sig)).decode()
+
+        return (tx, ser_sig)
+
+    def login_by_sk(self):
+        sk_pem = self.root.ids.sk_text.text
+
+        print(sk_pem)
+        
+        self.sk = ecdsa.SigningKey.from_pem(sk_pem, hashfunc=hashlib.sha256)
+        self.address = base58.b58encode(self.sk.verifying_key.to_string("compressed")).decode()
+        self.screen("main_screen")
+        self.refresh_balance()
+
+    def logout(self):
+        self.address = None
+        self.sk = None
+        self.root.ids.sk_text.text = ""
+        self.screen("login")
+
+    def send(self):
+        self.dialog_close(self.dialog_send)
+        to = self.dialog_send.content_cls.ids.to.text
+        amount = float(self.dialog_send.content_cls.ids.amount.text)
+
+        self.create_receiver_account()
+
+        tx, sig = self.send_logic(amount, to)
+        res = requests.post(f"{node}/add_tx", json=tx)
+
+        if res.status_code != 200:
+            toast("RPC отклонил транзакцию")
+
+    def create_receiver_account(self):
+        print("Create receiver account")
+        pubkey = self.dialog_send.content_cls.ids.to.text
+
+        if json.loads(requests.get(f"{node}/account/{pubkey}").text): print("Account already exists!") ; return
+
+        tx, sig = self.create_system_account_logic(pubkey)
+
+        res = requests.post(f"{node}/add_tx", json=tx)
+
+        if res.status_code != 200:
+            toast("RPC отклонил транзакцию")
+
+        print("End create receiver account")
+
+
+    def wait_for(self, sig):
+        while True:
+            res = requests.get(f"{node}/is_spent/{sig}").text
+
+            print(f"Got response: {res}")
+
+            if json.loads(res):
+                break
+            else:
+                time.sleep(500)
+                continue
+        
+        toast("Готово!")
+        self.refresh_balance()
+
+
+
+# def der_thing():
+#     for i in range(5):
+#         sk = ecdsa.SigningKey.generate()
+#         vk: ecdsa.VerifyingKey = sk.verifying_key
+#         der = base58.b58encode(vk.to_string("compressed")).decode()
+#         pem = base58.b58encode(vk.from_pem("compressed")).decode()
+
+
+#         print(der)
+
+# der_thing()
+
+
+Wallet().run()
+
