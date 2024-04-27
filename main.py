@@ -13,6 +13,7 @@ from kivymd.uix.boxlayout import MDBoxLayout
 from kivymd.uix.textfield import MDTextField
 from kivymd.uix.card import MDCard
 from kivy.core.clipboard import Clipboard
+from pathlib import Path
 
 import requests
 import json
@@ -26,7 +27,9 @@ import time
 import threading
 
 Window.size = (480, 800)
-node = "https://allen_neon_rpc.serveo.net"
+node = "http://allen_neon_rpc.serveo.net"
+
+home_path = Path.joinpath(Path.home(), "neon_keypair.pem")
 
 class Tab(MDFloatLayout, MDTabsBase):
     '''Class implementing content for a tab.'''
@@ -133,6 +136,13 @@ class Wallet(MDApp):
     def on_start(self):
         self.screen("login")
 
+        if os.path.isfile(home_path):
+            f = open(home_path, "r")
+            data = f.read()
+            f.close()
+            self.root.ids.sk_text.text = data
+            self.login_by_sk()
+
     def screen(self, id_):
         self.root.current = id_
 
@@ -152,11 +162,9 @@ class Wallet(MDApp):
     def create_account(self):
         global address
 
-        self.sk = ecdsa.SigningKey.generate(curve=ecdsa.curves.SECP256k1)
-        self.address = base58.b58encode(self.sk.verifying_key.to_string("compressed")).decode()
-        self.screen("main_screen")
-        self.refresh_balance()
+        self.root.ids.sk_text.text = ecdsa.SigningKey.generate(curve=ecdsa.curves.SECP256k1).to_pem()
 
+        self.login_by_sk()
     def send_logic(self, amount: int, to: str) -> tuple[dict, str]:
         message = {
             "nonce": str(random.randint(0, 10**100)),
@@ -244,7 +252,9 @@ class Wallet(MDApp):
     def login_by_sk(self):
         sk_pem = self.root.ids.sk_text.text
 
-        print(sk_pem)
+        f = open(home_path, "w")
+        f.write(sk_pem)
+        f.close()
         
         self.sk = ecdsa.SigningKey.from_pem(sk_pem, hashfunc=hashlib.sha256)
         self.address = base58.b58encode(self.sk.verifying_key.to_string("compressed")).decode()
@@ -252,6 +262,7 @@ class Wallet(MDApp):
         self.refresh_balance()
 
     def logout(self):
+        os.remove(home_path)
         self.address = None
         self.sk = None
         self.root.ids.sk_text.text = ""
